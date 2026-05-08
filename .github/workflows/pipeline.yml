@@ -9,7 +9,7 @@ env:
   AWS_REGION: eu-north-1
   ECR_REGISTRY: 012834916544.dkr.ecr.eu-north-1.amazonaws.com
   ECR_REPOSITORY: vulnwatch                    
-  ECS_CLUSTER: genderize-service               
+  ECS_CLUSTER: genderize-cluster               
   ECS_SERVICE_API: vulnwatch-api               
   ECS_SERVICE_WORKER: vulnwatch-worker         
   TASK_DEFINITION_API: vulnwatch-api-task      
