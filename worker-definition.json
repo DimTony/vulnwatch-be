@@ -1,0 +1,58 @@
+{
+  "family": "vulnwatch-worker-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::012834916544:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "vulnwatch-worker",
+      "image": "012834916544.dkr.ecr.eu-north-1.amazonaws.com/vulnwatch:worker-latest",
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "SPRING_FLYWAY_BASELINE_ON_MIGRATE",
+          "value": "true"
+        },
+        {
+          "name": "SPRING_JPA_HIBERNATE_DDL_AUTO",
+          "value": "validate"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "SPRING_DATASOURCE_URL",
+          "valueFrom": "arn:aws:ssm:eu-north-1:012834916544:parameter/vulvwatch/production/db-url"
+        },
+        {
+          "name": "SPRING_DATASOURCE_USERNAME",
+          "valueFrom": "arn:aws:ssm:eu-north-1:012834916544:parameter/vulvwatch/production/db-user"
+        },
+        {
+          "name": "SPRING_DATASOURCE_PASSWORD",
+          "valueFrom": "arn:aws:ssm:eu-north-1:012834916544:parameter/vulvwatch/production/db-pass"
+        },
+        {
+          "name": "SPRING_REDIS_HOST",
+          "valueFrom": "arn:aws:ssm:eu-north-1:012834916544:parameter/vulvwatch/production/redis-host"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vulnwatch-worker",
+          "awslogs-create-group": "true",
+          "awslogs-region": "eu-north-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "essential": true
+    }
+  ]
+}
