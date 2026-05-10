@@ -1,15 +1,17 @@
 using Domain.Entities;
 using Domain.Enums;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
 namespace Infrastructure.Persistence;
 
-public class VulnWatchDbContext : DbContext
+public class VulnWatchDbContext : IdentityDbContext<User, IdentityRole<Guid>, Guid>
 {
     public VulnWatchDbContext(DbContextOptions<VulnWatchDbContext> options)
         : base(options) { }
 
-    public DbSet<User> Users => Set<User>();
+    // Users table is provided by IdentityDbContext
     public DbSet<Waitlist> Waitlists => Set<Waitlist>();
     public DbSet<ScannedDomain> Domains => Set<ScannedDomain>();
     public DbSet<Scan> Scans => Set<Scan>();
@@ -19,14 +21,36 @@ public class VulnWatchDbContext : DbContext
     public DbSet<MonitoredRepository> MonitoredRepositories => Set<MonitoredRepository>();
     public DbSet<NotificationPreferences> NotificationPreferences => Set<NotificationPreferences>();
     public DbSet<WebHookOutBox> WebHookOutBox => Set<WebHookOutBox>();
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
+        base.OnModelCreating(builder); // must call base — sets up Identity tables
+
         builder.Entity<User>(e =>
         {
-            e.HasIndex(u => u.Email).IsUnique();
-            e.HasIndex(u => u.GoogleId).IsUnique();
-            e.Property(u => u.Email).IsRequired();
+            // Identity already handles Email uniqueness; only add custom index
+            e.HasIndex(u => u.GoogleId).IsUnique().HasFilter("\"GoogleId\" IS NOT NULL");
+        });
+
+        builder.Entity<RefreshToken>(e =>
+        {
+            e.HasKey(t => t.Id);
+
+            e.Property(t => t.TokenHash)
+            .IsRequired()
+            .HasMaxLength(512);
+
+            e.HasIndex(t => t.TokenHash).IsUnique();
+
+            e.HasIndex(t => t.UserId);
+
+            e.Property(t => t.CreatedByIp).HasMaxLength(45);
+
+            e.HasOne<User>()
+            .WithMany()
+            .HasForeignKey(t => t.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<ScannedDomain>(e =>

@@ -2,30 +2,68 @@ using Microsoft.AspNetCore.Identity;
 
 namespace Domain.Entities;
 
-public class ApplicationUser : IdentityUser;
-public class User : EntityBase
+public class User : IdentityUser<Guid>
 {
-    public string Email { get; private set; } = default!;
-    public string? PasswordHash { get; private set; }
     public string? GoogleId { get; private set; }
-    public bool IsEmailVerified { get; private set; }
-    public string? VerificationToken { get; private set; }
+    public DateTime CreatedAt { get; private set; }
+    public DateTime UpdatedAt { get; private set; }
 
-    private User() { }
-
-    public static User Create(string email, string? passwordHash = null, string? googleId = null, string? verificationToken = null)
-        => new()
-        {
-            Email = email,
-            PasswordHash = passwordHash,
-            GoogleId = googleId,
-            VerificationToken = verificationToken,
-        };
-
-    public void VerifyEmail()
+    public static User Create(string email) => new()
     {
-        IsEmailVerified = true;
-        VerificationToken = null;
+        Id = Guid.NewGuid(),
+        Email = email,
+        UserName = email,
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow
+    };
+
+    public static User CreateFromGoogle(string email, string googleId) => new()
+    {
+        Id = Guid.NewGuid(),
+        Email = email,
+        UserName = email,
+        EmailConfirmed = true,
+        GoogleId = googleId,
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow
+    };
+
+    public bool LinkGoogleAccount(string googleId)
+    {
+        if (string.Equals(GoogleId, googleId, StringComparison.Ordinal))
+            return false;
+
+        GoogleId = googleId;
+        Touch();
+        return true;
+    }
+
+    public bool UpdateEmailAddress(string email)
+    {
+        if (string.Equals(Email, email, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(UserName, email, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        Email = email;
+        UserName = email;
+        Touch();
+        return true;
+    }
+
+    public bool ConfirmEmail()
+    {
+        if (EmailConfirmed)
+            return false;
+
+        EmailConfirmed = true;
+        Touch();
+        return true;
+    }
+
+    public void Activate()
+    {
         Touch();
     }
+
+    private void Touch() => UpdatedAt = DateTime.UtcNow;
 }

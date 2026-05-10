@@ -1,15 +1,34 @@
-using Application.Interfaces;
+using Application.Features.Auth;
 using Application.Features.Scans;
+using Application.Interfaces;
+using Domain.Entities;
+using FluentValidation;
+using Infrastructure.Persistence;
+using Infrastructure.Persistence.Repositories;
 using Infrastructure.Redis;
+using Infrastructure.Services;
+using Application.Helpers;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using StackExchange.Redis;
+using System.Text;
 using System.Text.Json.Serialization;
+using Web.Extensions;
+using Web.Middleware;
+using Web.Services;
+using MediatR;
+using Application.Behaviours;
+
+LoadDotEnv();
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
-// Add services to the container.
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
@@ -18,34 +37,159 @@ builder.Services.AddControllers()
     });
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+        Scheme = "Bearer",
+        BearerFormat = "JWT",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Enter your JWT token. Example: eyJhbGci..."
+    });
 
-// MediatR
-builder.Services.AddMediatR(cfg => {
-    cfg.RegisterServicesFromAssembly(typeof(CreateScanCommand).Assembly);
+    options.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            []
+        }
+    });
 });
+
+// MediatR — scans Application assembly
+builder.Services.AddValidatorsFromAssembly(typeof(RegisterCommand).Assembly);
+builder.Services.AddMediatR(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(typeof(RegisterCommand).Assembly);
+});
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehaviour<,>));
+
+// Database
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnectionString");
+
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+}
+
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException("Default database connection string is not configured.");
+}
+
+builder.Services.AddDbContext<VulnWatchDbContext>(options =>
+    options.UseNpgsql(connectionString));
+
+// Identity — AddIdentityCore avoids overriding auth scheme to cookies
+builder.Services.AddIdentityCore<User>(options =>
+{
+    // Password policy
+    options.Password.RequiredLength = 8;
+    options.Password.RequireUppercase = true;
+    options.Password.RequireLowercase = true;
+    options.Password.RequireDigit = true;
+    options.Password.RequireNonAlphanumeric = true;
+    options.Password.RequiredUniqueChars = 1;
+
+    // Email
+    options.User.RequireUniqueEmail = true;
+    options.SignIn.RequireConfirmedEmail = true;
+
+    // Lockout
+    options.Lockout.MaxFailedAccessAttempts = 5;
+    options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+    options.Lockout.AllowedForNewUsers = true;
+})
+.AddRoles<IdentityRole<Guid>>()
+.AddEntityFrameworkStores<VulnWatchDbContext>()
+.AddDefaultTokenProviders();
+// JWT Authentication
+var jwtSecret = builder.Configuration["Jwt:SecretKey"];
+
+if (string.IsNullOrWhiteSpace(jwtSecret))
+{
+    throw new InvalidOperationException("Jwt:SecretKey is not configured.");
+}
+
+var jwtKey = Encoding.UTF8.GetBytes(jwtSecret);
+
+if (jwtKey.Length < 32)
+{
+    throw new InvalidOperationException(
+        "Jwt:SecretKey must be at least 32 characters (256 bits) for HS256 signing.");
+}
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(jwtKey),
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateLifetime = true
+        };
+        options.Events = new JwtBearerEvents
+        {
+            OnChallenge = ctx =>
+            {
+                ctx.HandleResponse();
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+builder.Services.AddAuthorization();
 
 // Redis
 var redisConfig = builder.Configuration.GetValue<string>("Redis:Configuration") ?? "localhost:6379";
-
 builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
 {
     var config = ConfigurationOptions.Parse(redisConfig);
-    config.AbortOnConnectFail = false; // Prevent exceptions on startup if Redis is unavailable
+    config.AbortOnConnectFail = false;
     return ConnectionMultiplexer.Connect(config);
 });
-
 builder.Services.AddSingleton<IRedisProducer, RedisProducer>();
-builder.Services.AddAuthentication();
-builder.Services.AddAuthorization();
+
+// Application services
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, AuthorizationResultHandler>();
+builder.Services.Configure<JwtConfig>(builder.Configuration.GetSection(JwtConfig.SectionName));
+builder.Services.AddScoped<ICurrentUser, CurrentUser>();
+builder.Services.AddScoped<IJwtService, JwtService>();
+builder.Services.AddScoped<IGoogleTokenVerifier, GoogleTokenVerifier>();
+builder.Services.AddScoped<IRefreshTokenRepository, RefreshTokenRepository>();
+builder.Services.AddScoped<ISessionService, SessionService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
 
 builder.Services.AddHealthChecks()
-    .AddRedis(redisConfig, "redis");
-
+    .AddNpgSql(
+        connectionString,
+        name: "postgres",
+        tags: ["db", "ready"])
+    .AddRedis(
+        redisConfig,
+        name: "redis",
+        tags: ["cache", "ready"]);
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<VulnWatchDbContext>();
+    dbContext.Database.Migrate();
+}
+
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
@@ -54,14 +198,21 @@ app.UseSwaggerUI(options =>
 });
 
 app.UseHttpsRedirection();
-
 app.UseAuthentication();
 
+app.UseMiddleware<JwtMiddleware>();
+
 app.UseAuthorization();
-
 app.MapControllers();
-
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    ResponseWriter = HealthResponse.WriteAsync
+});
+app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+    ResponseWriter = HealthResponse.WriteAsync
+});
 
 app.Lifetime.ApplicationStarted.Register(() =>
 {
@@ -69,3 +220,53 @@ app.Lifetime.ApplicationStarted.Register(() =>
 });
 
 app.Run();
+
+static void LoadDotEnv()
+{
+    foreach (var envPath in ResolveDotEnvCandidates())
+    {
+        if (!File.Exists(envPath))
+            continue;
+
+        foreach (var rawLine in File.ReadAllLines(envPath))
+        {
+            var line = rawLine.Trim();
+
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#'))
+                continue;
+
+            var separatorIndex = line.IndexOf('=');
+            if (separatorIndex <= 0)
+                continue;
+
+            var key = line[..separatorIndex].Trim();
+            var value = line[(separatorIndex + 1)..].Trim();
+
+            if (value.Length >= 2 &&
+                ((value.StartsWith('"') && value.EndsWith('"')) ||
+                 (value.StartsWith('\'') && value.EndsWith('\''))))
+            {
+                value = value[1..^1];
+            }
+
+            Environment.SetEnvironmentVariable(key, value);
+        }
+
+        return;
+    }
+}
+
+static IEnumerable<string> ResolveDotEnvCandidates()
+{
+    var currentDirectory = Directory.GetCurrentDirectory();
+    var appBaseDirectory = AppContext.BaseDirectory;
+
+    return new[]
+    {
+        Path.GetFullPath(Path.Combine(currentDirectory, "api-dotnet", ".env")),
+        Path.GetFullPath(Path.Combine(currentDirectory, ".env")),
+        Path.GetFullPath(Path.Combine(currentDirectory, "..", "..", ".env")),
+        Path.GetFullPath(Path.Combine(appBaseDirectory, "..", "..", "..", "..", ".env")),
+        Path.GetFullPath(Path.Combine(appBaseDirectory, "..", "..", "..", "..", "..", ".env"))
+    }.Distinct(StringComparer.OrdinalIgnoreCase);
+}
